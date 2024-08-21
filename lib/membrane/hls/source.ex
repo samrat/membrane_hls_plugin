@@ -38,7 +38,8 @@ defmodule Membrane.HLS.Source do
        reader: options.reader,
        master_playlist_uri: options.master_playlist_uri,
        pad_to_tracker: %{},
-       ref_to_pad: %{}
+       ref_to_pad: %{},
+       cached_header: {nil, nil}
      }}
   end
 
@@ -141,13 +142,63 @@ defmodule Membrane.HLS.Source do
 
     {pad, tracker} = tracker_by_task_ref!(state.pad_to_tracker, task_ref)
     segment = tracker.download.segment
+    %{media_uri: media_uri} = tracker
 
-    tracker =
+    {tracker, header_data} =
       case result do
         {:ok, data} ->
+          {data, header_data} =
+            if segment.map do
+              # This is a fmp4 segment, so convert to MPEG-TS
+              %{uri: map_uri} = segment.map
+
+              {cached_uri, cached_header} = state.cached_header
+
+              # TODO: cache header
+              {:ok, header_data} =
+                if cached_uri == map_uri do
+                  {:ok, cached_header}
+                else
+                  Reader.read(
+                    state.reader,
+                    Playlist.build_absolute_uri(media_uri, map_uri),
+                    Map.has_key?(segment.map, :byterange) &&
+                      byterange_to_range_header(segment.map.byterange)
+                  )
+                end
+
+              time = :os.system_time(:millisecond)
+
+              File.write!("/tmp/header#{time}.mp4", header_data)
+              File.write!("/tmp/segment#{time}.m4s", data)
+
+              System.cmd("ffmpeg", [
+                "-fflags",
+                "+genpts",
+                "-i",
+                "concat:/tmp/header#{time}.mp4|/tmp/segment#{time}.m4s",
+                "-c",
+                "copy",
+                "-bsf:v",
+                "h264_mp4toannexb",
+                "-copyts",
+                "-f",
+                "mpegts",
+                "/tmp/output#{time}.ts"
+              ])
+
+              data = File.read!("/tmp/output#{time}.ts")
+              # File.rm!("/tmp/output.ts")
+              # File.rm!("/tmp/header.mp4")
+              # File.rm!("/tmp/segment.m4s")
+              {data, header_data}
+            else
+              {data, nil}
+            end
+
           action = {:buffer, {pad, %Buffer{payload: data, metadata: segment}}}
           ready = Q.push(tracker.ready, action)
-          %{tracker | ready: ready, download: nil}
+          {%{tracker | ready: ready, download: nil}, header_data}
 
         {:error, message} ->
           Membrane.Logger.warning(
@@ -158,7 +209,13 @@ defmodule Membrane.HLS.Source do
       end
 
     tracker = start_download(tracker, state.reader)
-    state = %{state | pad_to_tracker: Map.put(state.pad_to_tracker, pad, tracker)}
+
+    state = %{
+      state
+      | pad_to_tracker: Map.put(state.pad_to_tracker, pad, tracker),
+        cached_header: {segment.map && segment.map.uri, header_data}
+    }
+
     {[{:redemand, pad}], state}
   end
 
@@ -224,7 +281,12 @@ defmodule Membrane.HLS.Source do
           Task.Supervisor.async_nolink(TaskSupervisor, fn ->
             Reader.read(
               reader,
-              Playlist.build_absolute_uri(media_uri, segment.uri)
+              Playlist.build_absolute_uri(media_uri, segment.uri),
+              if segment.byterange do
+                byterange_to_range_header(segment.byterange)
+              else
+                nil
+              end
             )
           end)
 
@@ -249,4 +311,8 @@ defmodule Membrane.HLS.Source do
 
   defp build_stream_format(rendition),
     do: raise(ArgumentError, "Unable to provide a proper cap for rendition #{inspect(rendition)}")
+
+  defp byterange_to_range_header(%{offset: offset, length: length}) do
+    "bytes=#{offset}-#{offset + length - 1}"
+  end
 end
