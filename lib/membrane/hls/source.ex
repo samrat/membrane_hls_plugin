@@ -283,9 +283,9 @@ defmodule Membrane.HLS.Source do
               reader,
               Playlist.build_absolute_uri(media_uri, segment.uri),
               if segment.byterange do
-                byterange_to_range_header(segment.byterange)
+                [header: {"Range", byterange_to_range_header(segment.byterange)}]
               else
-                nil
+                []
               end
             )
           end)
