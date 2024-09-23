@@ -148,9 +148,9 @@ defmodule Membrane.HLS.Source do
       case result do
         {:ok, data} ->
           {data, header_data} =
-            if segment.map do
+            if segment.init_section do
               # This is a fmp4 segment, so convert to MPEG-TS
-              %{uri: map_uri} = segment.map
+              %{uri: map_uri} = segment.init_section
 
               {cached_uri, cached_header} = state.cached_header
 
@@ -162,8 +162,8 @@ defmodule Membrane.HLS.Source do
                   Reader.read(
                     state.reader,
                     Playlist.build_absolute_uri(media_uri, map_uri),
-                    Map.has_key?(segment.map, :byterange) &&
-                      byterange_to_range_header(segment.map.byterange)
+                    Map.has_key?(segment.init_section, :byterange) &&
+                      byterange_to_range_header(segment.init_section.byterange)
                   )
                 end
 
@@ -213,7 +213,7 @@ defmodule Membrane.HLS.Source do
     state = %{
       state
       | pad_to_tracker: Map.put(state.pad_to_tracker, pad, tracker),
-        cached_header: {segment.map && segment.map.uri, header_data}
+        cached_header: {segment.init_section && segment.init_section.uri, header_data}
     }
 
     {[{:redemand, pad}], state}
